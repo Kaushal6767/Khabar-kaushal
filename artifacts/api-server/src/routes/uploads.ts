@@ -5,6 +5,40 @@ import { requireAuth, type AuthedRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
+function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === "production" || !!process.env.RENDER;
+}
+
+function ensureCloudinaryConfigured(): { ok: true } | { ok: false; error: string } {
+  // Preferred: single CLOUDINARY_URL (cloudinary://API_KEY:API_SECRET@CLOUD_NAME)
+  if (process.env.CLOUDINARY_URL) {
+    cloudinary.config({ secure: true });
+    return { ok: true };
+  }
+
+  // Alternate: separate vars
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  if (cloudName && apiKey && apiSecret) {
+    cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret, secure: true });
+    return { ok: true };
+  }
+
+  const missing = [
+    !process.env.CLOUDINARY_URL ? "CLOUDINARY_URL" : null,
+    !cloudName ? "CLOUDINARY_CLOUD_NAME" : null,
+    !apiKey ? "CLOUDINARY_API_KEY" : null,
+    !apiSecret ? "CLOUDINARY_API_SECRET" : null,
+  ].filter(Boolean);
+  return {
+    ok: false,
+    error:
+      `Cloudinary is not configured. Set CLOUDINARY_URL (recommended) ` +
+      `or CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET. Missing: ${missing.join(", ")}`,
+  };
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -24,8 +58,10 @@ router.post(
   requireAuth,
   upload.array("files"),
   async (req: AuthedRequest, res): Promise<void> => {
-    if (!process.env.CLOUDINARY_URL) {
-      res.status(500).json({ error: "CLOUDINARY_URL is not configured" });
+    const cfg = ensureCloudinaryConfigured();
+    if (!cfg.ok) {
+      req.log.error({ configured: false }, "Cloudinary is not configured");
+      res.status(isProductionEnv() ? 500 : 501).json({ error: cfg.error });
       return;
     }
 

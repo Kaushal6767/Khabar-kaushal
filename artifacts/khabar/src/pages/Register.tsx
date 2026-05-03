@@ -2,7 +2,6 @@ import { useState, useRef, type FormEvent, type ChangeEvent } from "react";
 import { Link, useLocation } from "wouter";
 import { Radio, Loader2, Camera, X } from "lucide-react";
 import type { CurrentUser } from "@workspace/api-zod";
-import { useUpload } from "@workspace/object-storage-web";
 import { authFetch, useAuth, API_BASE_URL } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -70,17 +69,39 @@ export default function Register() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { uploadFile, isUploading, progress } = useUpload({
-    basePath: `${API_BASE_URL}/storage`,
-    onSuccess: (resp) => setPhotoUrl(resp.objectPath),
-    onError: (err) => setError(err.message),
-  });
+  const [isUploading, setIsUploading] = useState(false);
 
   async function onPhotoChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setError(null);
-    await uploadFile(file);
+    setIsUploading(true);
+    try {
+      const ct = file.type.toLowerCase();
+      const ok = ["image/jpeg", "image/png", "image/webp"].includes(ct);
+      if (!ok) {
+        throw new Error("Please upload a jpg, png, or webp image.");
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        throw new Error("Photo must be under 10MB.");
+      }
+
+      const fd = new FormData();
+      fd.append("files", file, file.name);
+      const res = await authFetch("/uploads", { method: "POST", body: fd });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || "Upload failed");
+      }
+      const data = (await res.json()) as { files: { url: string }[] };
+      const url = data.files?.[0]?.url;
+      if (!url) throw new Error("Upload failed");
+      setPhotoUrl(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setIsUploading(false);
+    }
   }
 
   async function onSubmit(e: FormEvent) {
@@ -184,7 +205,7 @@ export default function Register() {
                   data-testid="button-upload-photo"
                 >
                   <Camera className="w-4 h-4 mr-2" />
-                  {isUploading ? `Uploading ${progress}%` : photoUrl ? "Change photo" : "Add photo"}
+                  {isUploading ? "Uploading..." : photoUrl ? "Change photo" : "Add photo"}
                 </Button>
                 {photoUrl && !isUploading && (
                   <Button
