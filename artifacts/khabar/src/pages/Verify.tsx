@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authFetch, useAuth } from "@/lib/auth";
+import { toast } from "sonner";
 
 type Channel = "email" | "phone";
 
@@ -56,7 +57,9 @@ export default function Verify() {
         throw new Error(data.error || "Failed to send OTP");
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to send OTP");
+      const msg = e instanceof Error ? e.message : "Failed to send OTP";
+      setError(msg);
+      toast.error(msg);
     } finally {
       setSending(null);
     }
@@ -77,7 +80,9 @@ export default function Verify() {
       }
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Verification failed");
+      const msg = e instanceof Error ? e.message : "Verification failed";
+      setError(msg);
+      toast.error(msg);
     } finally {
       setVerifying(null);
     }
@@ -95,9 +100,6 @@ export default function Verify() {
 
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6 sm:p-8">
           <h1 className="text-2xl font-bold mb-1">Verify your account</h1>
-          <p className="text-sm text-zinc-500 mb-6">
-            We’ll generate OTPs on the server and print them to the backend terminal for now.
-          </p>
 
           <div className="space-y-6">
             {steps.map((s) => {
@@ -191,11 +193,6 @@ export default function Verify() {
                 {error}
               </div>
             )}
-
-            <div className="text-xs text-zinc-500">
-              Tip: check the backend terminal logs for lines like{" "}
-              <span className="font-mono text-zinc-300">[OTP] uid=... otp=123456</span>.
-            </div>
           </div>
         </div>
       </div>
