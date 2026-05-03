@@ -26,12 +26,16 @@ export default defineConfig({
     strictPort: true,
     host: "0.0.0.0",
     allowedHosts: true,
-    proxy: {
-      "/api": {
-        target: "http://localhost:3002",
-        changeOrigin: true,
-      },
-    },
+    // For local dev, set `VITE_API_PROXY_TARGET` to your backend origin.
+    // In production builds, the app is served by the same Express host, so it uses relative `/api`.
+    proxy: process.env.VITE_API_PROXY_TARGET
+      ? {
+          "/api": {
+            target: process.env.VITE_API_PROXY_TARGET,
+            changeOrigin: true,
+          },
+        }
+      : undefined,
     fs: {
       strict: true,
     },

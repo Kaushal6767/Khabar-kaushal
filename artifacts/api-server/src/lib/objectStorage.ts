@@ -9,25 +9,64 @@ import {
   setObjectAclPolicy,
 } from "./objectAcl";
 
-const REPLIT_SIDECAR_ENDPOINT = "http://127.0.0.1:1106";
+function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === "production" || !!process.env.RENDER;
+}
 
-export const objectStorageClient = new Storage({
-  credentials: {
-    audience: "replit",
-    subject_token_type: "access_token",
-    token_url: `${REPLIT_SIDECAR_ENDPOINT}/token`,
-    type: "external_account",
-    credential_source: {
-      url: `${REPLIT_SIDECAR_ENDPOINT}/credential`,
-      format: {
-        type: "json",
-        subject_token_field_name: "access_token",
+let _objectStorageClient: Storage | null = null;
+function getObjectStorageClient(): Storage {
+  if (_objectStorageClient) return _objectStorageClient;
+
+  // Mode A: standard GCP auth (recommended for production)
+  // - Use GOOGLE_APPLICATION_CREDENTIALS / workload identity / default credentials
+  // - Optionally set GCP_PROJECT_ID
+  const useDefaultCredentials = !!(
+    process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCP_PROJECT_ID
+  );
+  if (useDefaultCredentials) {
+    _objectStorageClient = new Storage({
+      projectId: process.env.GCP_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT,
+    });
+    return _objectStorageClient;
+  }
+
+  // Mode B: Replit sidecar signer/auth (dev / Replit only)
+  const sidecar = (process.env.REPLIT_SIDECAR_ENDPOINT ?? "").trim().replace(/\/+$/, "");
+  if (!sidecar) {
+    if (isProductionEnv()) {
+      throw new Error(
+        "Object storage is not configured for production. " +
+          "Set GOOGLE_APPLICATION_CREDENTIALS (or other GCP auth) and bucket env vars, " +
+          "or disable storage routes.",
+      );
+    }
+    throw new Error(
+      "REPLIT_SIDECAR_ENDPOINT not set. " +
+        "If running on Replit, set REPLIT_SIDECAR_ENDPOINT; otherwise configure GCP credentials for Storage.",
+    );
+  }
+
+  _objectStorageClient = new Storage({
+    credentials: {
+      audience: "replit",
+      subject_token_type: "access_token",
+      token_url: `${sidecar}/token`,
+      type: "external_account",
+      credential_source: {
+        url: `${sidecar}/credential`,
+        format: {
+          type: "json",
+          subject_token_field_name: "access_token",
+        },
       },
+      universe_domain: "googleapis.com",
     },
-    universe_domain: "googleapis.com",
-  },
-  projectId: "",
-});
+    projectId: "",
+  });
+  return _objectStorageClient;
+}
 
 export class ObjectNotFoundError extends Error {
   constructor() {
@@ -75,7 +114,7 @@ export class ObjectStorageService {
       const fullPath = `${searchPath}/${filePath}`;
 
       const { bucketName, objectName } = parseObjectPath(fullPath);
-      const bucket = objectStorageClient.bucket(bucketName);
+      const bucket = getObjectStorageClient().bucket(bucketName);
       const file = bucket.file(objectName);
 
       const [exists] = await file.exists();
@@ -145,7 +184,7 @@ export class ObjectStorageService {
     }
     const objectEntityPath = `${entityDir}${entityId}`;
     const { bucketName, objectName } = parseObjectPath(objectEntityPath);
-    const bucket = objectStorageClient.bucket(bucketName);
+    const bucket = getObjectStorageClient().bucket(bucketName);
     const objectFile = bucket.file(objectName);
     const [exists] = await objectFile.exists();
     if (!exists) {
@@ -238,6 +277,13 @@ async function signObjectURL({
   method: "GET" | "PUT" | "DELETE" | "HEAD";
   ttlSec: number;
 }): Promise<string> {
+  const sidecar = (process.env.REPLIT_SIDECAR_ENDPOINT ?? "").trim().replace(/\/+$/, "");
+  if (!sidecar) {
+    throw new Error(
+      "REPLIT_SIDECAR_ENDPOINT not set. Signed object URLs require the Replit sidecar. " +
+        "In production, prefer Cloudinary uploads or implement GCS signed URLs with a service account.",
+    );
+  }
   const request = {
     bucket_name: bucketName,
     object_name: objectName,
@@ -245,7 +291,7 @@ async function signObjectURL({
     expires_at: new Date(Date.now() + ttlSec * 1000).toISOString(),
   };
   const response = await fetch(
-    `${REPLIT_SIDECAR_ENDPOINT}/object-storage/signed-object-url`,
+    `${sidecar}/object-storage/signed-object-url`,
     {
       method: "POST",
       headers: {

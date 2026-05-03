@@ -156,7 +156,8 @@ export function mockupPreviewPlugin(): Plugin {
       });
 
       viteServer.middlewares.use((req, res, next) => {
-        const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+        // The base is required for `new URL()` parsing; the value is not used for networking.
+        const requestUrl = new URL(req.url ?? "/", "http://example.invalid");
         const pathname = requestUrl.pathname;
         const originalEnd = res.end.bind(res);
 
