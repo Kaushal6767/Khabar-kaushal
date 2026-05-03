@@ -64,44 +64,32 @@ export default function Register() {
   const [state, setState] = useState("");
   const [district, setDistrict] = useState("");
   const [locality, setLocality] = useState("");
-  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [isUploading, setIsUploading] = useState(false);
-
   async function onPhotoChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    e.target.value = "";
     setError(null);
-    setIsUploading(true);
-    try {
-      const ct = file.type.toLowerCase();
-      const ok = ["image/jpeg", "image/png", "image/webp"].includes(ct);
-      if (!ok) {
-        throw new Error("Please upload a jpg, png, or webp image.");
-      }
-      if (file.size > 10 * 1024 * 1024) {
-        throw new Error("Photo must be under 10MB.");
-      }
 
-      const fd = new FormData();
-      fd.append("files", file, file.name);
-      const res = await authFetch("/uploads", { method: "POST", body: fd });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error || "Upload failed");
-      }
-      const data = (await res.json()) as { files: { url: string }[] };
-      const url = data.files?.[0]?.url;
-      if (!url) throw new Error("Upload failed");
-      setPhotoUrl(url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setIsUploading(false);
+    const ct = file.type.toLowerCase();
+    const ok = ["image/jpeg", "image/png", "image/webp"].includes(ct);
+    if (!ok) {
+      setError("Please upload a jpg, png, or webp image.");
+      return;
     }
+    if (file.size > 10 * 1024 * 1024) {
+      setError("Photo must be under 10MB.");
+      return;
+    }
+
+    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
+    setPhotoFile(file);
+    setPhotoPreviewUrl(URL.createObjectURL(file));
   }
 
   async function onSubmit(e: FormEvent) {
@@ -111,21 +99,21 @@ export default function Register() {
     try {
       if (!state.trim()) throw new Error("Please select a State/UT");
       if (!district.trim()) throw new Error("Please select a District");
-      const body = {
-        username: username.trim(),
-        email: email.trim(),
-        password,
-        displayName: displayName.trim(),
-        state: state.trim() || "Unknown",
-        district: district.trim() || "Unknown",
-        locality: locality.trim() || "Unknown",
-        phoneNumber: phoneNumber.trim() || undefined,
-        photoUrl: photoUrl || undefined,
-      };
+
+      const fd = new FormData();
+      fd.append("username", username.trim());
+      fd.append("email", email.trim());
+      fd.append("password", password);
+      fd.append("displayName", displayName.trim());
+      fd.append("state", state.trim() || "Unknown");
+      fd.append("district", district.trim() || "Unknown");
+      fd.append("locality", locality.trim() || "Unknown");
+      if (phoneNumber.trim()) fd.append("phoneNumber", phoneNumber.trim());
+      if (photoFile) fd.append("photo", photoFile, photoFile.name);
+
       const res = await authFetch("/auth/register", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: fd,
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
@@ -141,7 +129,7 @@ export default function Register() {
     }
   }
 
-  const photoPreview = objectUrl(photoUrl);
+  const photoPreview = photoPreviewUrl ?? undefined;
   const initials = (displayName || username || "U").substring(0, 2).toUpperCase();
   const districts = state ? (INDIAN_LOCATIONS[state] ?? []) : [];
 
@@ -191,7 +179,7 @@ export default function Register() {
                 <input
                   ref={fileRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/jpeg,image/png,image/webp"
                   className="hidden"
                   onChange={onPhotoChange}
                   data-testid="input-photo"
@@ -200,20 +188,23 @@ export default function Register() {
                   type="button"
                   variant="outline"
                   onClick={() => fileRef.current?.click()}
-                  disabled={isUploading}
                   className="border-zinc-700 bg-zinc-900 hover:bg-zinc-800"
                   data-testid="button-upload-photo"
                 >
                   <Camera className="w-4 h-4 mr-2" />
-                  {isUploading ? "Uploading..." : photoUrl ? "Change photo" : "Add photo"}
+                  {photoFile ? "Change photo" : "Add photo"}
                 </Button>
-                {photoUrl && !isUploading && (
+                {photoFile && (
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
                     className="ml-2 text-zinc-500 hover:text-rose-400"
-                    onClick={() => setPhotoUrl(null)}
+                    onClick={() => {
+                      setPhotoFile(null);
+                      if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
+                      setPhotoPreviewUrl(null);
+                    }}
                   >
                     <X className="w-4 h-4 mr-1" /> Remove
                   </Button>
@@ -365,7 +356,7 @@ export default function Register() {
 
             <Button
               type="submit"
-              disabled={submitting || isUploading}
+              disabled={submitting}
               className="w-full bg-emerald-600 hover:bg-emerald-700"
               data-testid="button-register"
             >

@@ -3,6 +3,8 @@ import { randomBytes } from "crypto";
 import { eq, or } from "drizzle-orm";
 import { db, usersTable } from "@workspace/db";
 import { OAuth2Client } from "google-auth-library";
+import multer from "multer";
+import { v2 as cloudinary } from "cloudinary";
 import {
   RegisterBody,
   LoginBody,
@@ -27,6 +29,11 @@ import { getUserCounts, serializeCurrentUser } from "../lib/serializers";
 import { OtpDeliveryError, isProductionEnv, sendEmailOtp, sendPhoneOtp } from "../lib/otpDelivery";
 
 const router: IRouter = Router();
+
+const registerUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+});
 
 function newUid(): string {
   return `u_${randomBytes(8).toString("hex")}`;
@@ -351,12 +358,81 @@ router.post("/auth/verify/confirm", requireAuth, async (req: AuthedRequest, res)
   res.json(GetCurrentUserResponse.parse(serializeCurrentUser(updated ?? user, counts)));
 });
 
-router.post("/auth/register", async (req, res): Promise<void> => {
-  const parsed = RegisterBody.safeParse(req.body);
+function ensureCloudinaryConfigured(): { ok: true } | { ok: false; error: string } {
+  if (process.env.CLOUDINARY_URL) {
+    cloudinary.config({ secure: true });
+    return { ok: true };
+  }
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  if (cloudName && apiKey && apiSecret) {
+    cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret, secure: true });
+    return { ok: true };
+  }
+  const missing = [
+    !process.env.CLOUDINARY_URL ? "CLOUDINARY_URL" : null,
+    !cloudName ? "CLOUDINARY_CLOUD_NAME" : null,
+    !apiKey ? "CLOUDINARY_API_KEY" : null,
+    !apiSecret ? "CLOUDINARY_API_SECRET" : null,
+  ].filter(Boolean);
+  return {
+    ok: false,
+    error:
+      `Cloudinary is not configured. Set CLOUDINARY_URL (recommended) or ` +
+      `CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET. Missing: ${missing.join(", ")}`,
+  };
+}
+
+async function uploadAvatarToCloudinary(
+  file: Express.Multer.File,
+): Promise<{ secureUrl: string }> {
+  const ct = (file.mimetype ?? "").toLowerCase();
+  const ok = ["image/jpeg", "image/png", "image/webp"].includes(ct);
+  if (!ok) {
+    throw new Error(`Unsupported photo type: ${file.mimetype}`);
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error("Photo exceeds 10MB");
+  }
+
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: "khabar/avatars",
+        resource_type: "image",
+        unique_filename: true,
+      },
+      (err, result) => {
+        if (err || !result?.secure_url) {
+          reject(err ?? new Error("Upload failed"));
+          return;
+        }
+        resolve({ secureUrl: result.secure_url });
+      },
+    );
+    stream.end(file.buffer);
+  });
+}
+
+router.post("/auth/register", registerUpload.single("photo"), async (req, res): Promise<void> => {
+  // `multer` populates text fields on req.body for multipart requests.
+  const parsed = RegisterBody.safeParse({
+    username: req.body?.username,
+    email: req.body?.email,
+    password: req.body?.password,
+    displayName: req.body?.displayName,
+    state: req.body?.state,
+    district: req.body?.district,
+    locality: req.body?.locality,
+    phoneNumber: req.body?.phoneNumber,
+    photoUrl: undefined,
+  });
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
     return;
   }
+
   const data = parsed.data;
   const username = data.username.trim().toLowerCase();
   const email = data.email.trim().toLowerCase();
@@ -383,6 +459,25 @@ router.post("/auth/register", async (req, res): Promise<void> => {
     }
   }
 
+  let photoUrl: string | null = null;
+  const file = req.file;
+  if (file) {
+    const cfg = ensureCloudinaryConfigured();
+    if (!cfg.ok) {
+      req.log.error({ configured: false }, "Cloudinary is not configured for avatar upload");
+      res.status(isProductionEnv() ? 500 : 501).json({ error: cfg.error });
+      return;
+    }
+    try {
+      const uploaded = await uploadAvatarToCloudinary(file);
+      photoUrl = uploaded.secureUrl;
+    } catch (err) {
+      req.log.error({ err }, "Avatar upload failed during registration");
+      res.status(500).json({ error: "Failed to upload avatar" });
+      return;
+    }
+  }
+
   const passwordHash = await hashPassword(data.password);
   const uid = newUid();
   const [created] = await db
@@ -397,7 +492,7 @@ router.post("/auth/register", async (req, res): Promise<void> => {
       district: data.district.trim() || "Unknown",
       locality: data.locality.trim() || "Unknown",
       phoneNumber: data.phoneNumber?.trim() || null,
-      photoUrl: data.photoUrl?.trim() || null,
+      photoUrl,
       currentReputationScore: 0,
       isEmailVerified: false,
       isPhoneVerified: false,
