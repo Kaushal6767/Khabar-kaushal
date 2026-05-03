@@ -5,6 +5,27 @@ export type OtpDeliveryResult =
   | { ok: true; via: "smtp" | "twilio" | "msg91" | "mock" }
   | { ok: false; error: string; details?: Record<string, unknown> };
 
+export type OtpDeliveryErrorKind = "config" | "provider";
+
+export class OtpDeliveryError extends Error {
+  kind: OtpDeliveryErrorKind;
+  httpStatus: 500 | 503;
+  details?: Record<string, unknown>;
+
+  constructor(message: string, opts: { kind: OtpDeliveryErrorKind; httpStatus: 500 | 503; details?: Record<string, unknown> }) {
+    super(message);
+    this.name = "OtpDeliveryError";
+    this.kind = opts.kind;
+    this.httpStatus = opts.httpStatus;
+    this.details = opts.details;
+  }
+}
+
+export function isProductionEnv(): boolean {
+  // Treat Render as production-like even if NODE_ENV isn't set correctly.
+  return process.env.NODE_ENV === "production" || !!process.env.RENDER;
+}
+
 function maskEmail(email: string): string {
   const [u, d] = email.split("@");
   if (!d) return "***";
@@ -31,6 +52,13 @@ export async function sendEmailOtp(log: Logger, to: string, code: string): Promi
 
   if (!host || !user || !pass) {
     const missing = ["SMTP_HOST", "SMTP_USER", "SMTP_PASS"].filter((k) => !process.env[k]);
+    if (isProductionEnv()) {
+      throw new OtpDeliveryError("OTP email delivery is not configured (missing SMTP environment variables).", {
+        kind: "config",
+        httpStatus: 500,
+        details: { missing },
+      });
+    }
     log.warn(
       { channel: "email", missingEnv: missingEnv(["SMTP_HOST", "SMTP_USER", "SMTP_PASS"]), to: maskEmail(to) },
       "OTP email: SMTP not configured (set SMTP_HOST, SMTP_USER, SMTP_PASS)",
@@ -68,6 +96,13 @@ export async function sendEmailOtp(log: Logger, to: string, code: string): Promi
       },
       "OTP email: nodemailer send failed (check SMTP_*, network, firewall)",
     );
+    if (isProductionEnv()) {
+      throw new OtpDeliveryError("OTP email delivery failed (SMTP provider unavailable).", {
+        kind: "provider",
+        httpStatus: 503,
+        details: { message: err instanceof Error ? err.message : String(err) },
+      });
+    }
     return {
       ok: false,
       error: "smtp_send_failed",
@@ -85,6 +120,13 @@ async function sendSmsTwilio(log: Logger, to: string, code: string): Promise<Otp
     const missing = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"].filter(
       (k) => !process.env[k] && !(k === "TWILIO_PHONE_NUMBER" && process.env.TWILIO_FROM_NUMBER),
     );
+    if (isProductionEnv()) {
+      throw new OtpDeliveryError("OTP SMS delivery is not configured (missing Twilio environment variables).", {
+        kind: "config",
+        httpStatus: 500,
+        details: { missing },
+      });
+    }
     log.warn(
       {
         channel: "phone",
@@ -123,12 +165,26 @@ async function sendSmsTwilio(log: Logger, to: string, code: string): Promise<Otp
         },
         "OTP SMS: Twilio API returned an error",
       );
+      if (isProductionEnv()) {
+        throw new OtpDeliveryError("OTP SMS delivery failed (Twilio API error).", {
+          kind: "provider",
+          httpStatus: 503,
+          details: { status: resp.status },
+        });
+      }
       return { ok: false, error: "twilio_api_error", details: { status: resp.status } };
     }
     log.info({ channel: "phone", to: maskPhone(to) }, "OTP SMS sent via Twilio");
     return { ok: true, via: "twilio" };
   } catch (err) {
     log.error({ err, channel: "phone", to: maskPhone(to) }, "OTP SMS: Twilio request failed");
+    if (isProductionEnv()) {
+      throw new OtpDeliveryError("OTP SMS delivery failed (Twilio provider unavailable).", {
+        kind: "provider",
+        httpStatus: 503,
+        details: { message: err instanceof Error ? err.message : String(err) },
+      });
+    }
     return {
       ok: false,
       error: "twilio_request_failed",
@@ -144,6 +200,13 @@ async function sendSmsMsg91(log: Logger, to: string, code: string): Promise<OtpD
 
   if (!authkey || !templateId || !senderId) {
     const missing = ["MSG91_AUTH_KEY", "MSG91_TEMPLATE_ID", "MSG91_SENDER_ID"].filter((k) => !process.env[k]);
+    if (isProductionEnv()) {
+      throw new OtpDeliveryError("OTP SMS delivery is not configured (missing MSG91 environment variables).", {
+        kind: "config",
+        httpStatus: 500,
+        details: { missing },
+      });
+    }
     log.warn(
       {
         channel: "phone",
@@ -158,6 +221,13 @@ async function sendSmsMsg91(log: Logger, to: string, code: string): Promise<OtpD
   const mobile = to.replace(/\D/g, "");
   if (!mobile) {
     log.error({ channel: "phone", raw: to }, "OTP SMS: could not normalize phone for MSG91");
+    if (isProductionEnv()) {
+      throw new OtpDeliveryError("OTP SMS delivery failed (invalid phone number).", {
+        kind: "provider",
+        httpStatus: 500,
+        details: { raw: to },
+      });
+    }
     return { ok: false, error: "invalid_phone" };
   }
 
@@ -192,12 +262,26 @@ async function sendSmsMsg91(log: Logger, to: string, code: string): Promise<OtpD
         },
         "OTP SMS: MSG91 flow API returned an error (verify template_id and recipient field names)",
       );
+      if (isProductionEnv()) {
+        throw new OtpDeliveryError("OTP SMS delivery failed (MSG91 API error).", {
+          kind: "provider",
+          httpStatus: 503,
+          details: { status: resp.status },
+        });
+      }
       return { ok: false, error: "msg91_api_error", details: { status: resp.status } };
     }
     log.info({ channel: "phone", to: maskPhone(to) }, "OTP SMS sent via MSG91");
     return { ok: true, via: "msg91" };
   } catch (err) {
     log.error({ err, channel: "phone", to: maskPhone(to) }, "OTP SMS: MSG91 request failed");
+    if (isProductionEnv()) {
+      throw new OtpDeliveryError("OTP SMS delivery failed (MSG91 provider unavailable).", {
+        kind: "provider",
+        httpStatus: 503,
+        details: { message: err instanceof Error ? err.message : String(err) },
+      });
+    }
     return {
       ok: false,
       error: "msg91_request_failed",
@@ -232,6 +316,17 @@ export async function sendPhoneOtp(log: Logger, to: string, code: string): Promi
     return sendSmsMsg91(log, to, code);
   }
 
+  if (isProductionEnv()) {
+    throw new OtpDeliveryError("OTP SMS delivery is not configured (no provider configured).", {
+      kind: "config",
+      httpStatus: 500,
+      details: {
+        missingProviders: true,
+        hint:
+          "Set Twilio (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER) or MSG91 (MSG91_AUTH_KEY, MSG91_TEMPLATE_ID, MSG91_SENDER_ID)",
+      },
+    });
+  }
   log.warn(
     {
       channel: "phone",

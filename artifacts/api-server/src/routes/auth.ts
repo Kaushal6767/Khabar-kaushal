@@ -24,7 +24,7 @@ import {
   type AuthedRequest,
 } from "../lib/auth";
 import { getUserCounts, serializeCurrentUser } from "../lib/serializers";
-import { sendEmailOtp, sendPhoneOtp } from "../lib/otpDelivery";
+import { OtpDeliveryError, isProductionEnv, sendEmailOtp, sendPhoneOtp } from "../lib/otpDelivery";
 
 const router: IRouter = Router();
 
@@ -257,47 +257,43 @@ router.post("/auth/verify/request", requireAuth, async (req: AuthedRequest, res)
   const existing = otpStore.get(key) ?? {};
   otpStore.set(key, { ...existing, [channel]: { code, expiresAtMs } });
 
-  const isProd = process.env.NODE_ENV === "production";
+  const isProd = isProductionEnv();
 
-  if (channel === "email") {
-    const delivered = await sendEmailOtp(req.log, user.email, code);
-    if (!delivered.ok) {
-      if (delivered.error === "smtp_not_configured") {
-        if (isProd) {
-          req.log.error(
-            { uid: user.uid, channel },
-            "Production email OTP: SMTP is not configured (set SMTP_HOST, SMTP_USER, SMTP_PASS)",
-          );
-          res.status(503).json({ error: "Verification email could not be sent. Try again later." });
+  try {
+    if (channel === "email") {
+      const delivered = await sendEmailOtp(req.log, user.email, code);
+      if (!delivered.ok) {
+        if (!isProd && delivered.error === "smtp_not_configured") {
+          // Dev-only convenience: allow local testing without SMTP.
+          console.log(`[OTP] uid=${user.uid} channel=${channel} otp=${code}`);
+        } else {
+          res.status(503).json({ error: "Failed to send OTP. Please contact support." });
           return;
         }
-        console.log(`[OTP] uid=${user.uid} channel=${channel} otp=${code}`);
-        req.log.info({ uid: user.uid, channel, otp: code }, "Dev fallback: OTP logged (SMTP not configured)");
-      } else {
-        res.status(503).json({ error: "Failed to send verification email" });
-        return;
       }
-    }
-  } else {
-    const phone = user.phoneNumber!;
-    const delivered = await sendPhoneOtp(req.log, phone, code);
-    if (!delivered.ok) {
-      if (delivered.error === "sms_not_configured") {
-        if (isProd) {
-          req.log.error(
-            { uid: user.uid, channel },
-            "Production phone OTP: no SMS provider (configure Twilio or MSG91)",
-          );
-          res.status(503).json({ error: "Verification SMS could not be sent. Try again later." });
+    } else {
+      const phone = user.phoneNumber!;
+      const delivered = await sendPhoneOtp(req.log, phone, code);
+      if (!delivered.ok) {
+        if (!isProd && delivered.error === "sms_not_configured") {
+          // Dev-only convenience: allow local testing without SMS provider.
+          console.log(`[OTP] uid=${user.uid} channel=${channel} otp=${code}`);
+        } else {
+          res.status(503).json({ error: "Failed to send OTP. Please contact support." });
           return;
         }
-        console.log(`[OTP] uid=${user.uid} channel=${channel} otp=${code}`);
-        req.log.info({ uid: user.uid, channel, otp: code }, "Dev fallback: OTP logged (SMS not configured)");
-      } else {
-        res.status(503).json({ error: "Failed to send verification SMS" });
-        return;
       }
     }
+  } catch (err) {
+    if (err instanceof OtpDeliveryError) {
+      // In production this is our strict behavior: no mock fallback, and never leak OTP.
+      req.log.error({ err, uid: user.uid, channel }, "OTP delivery failed");
+      res.status(err.httpStatus).json({ error: "Failed to send OTP. Please contact support." });
+      return;
+    }
+    req.log.error({ err, uid: user.uid, channel }, "Unexpected error while sending OTP");
+    res.status(500).json({ error: "Failed to send OTP. Please contact support." });
+    return;
   }
 
   res.json({ ok: true, channel, expiresInSeconds: 600 });
